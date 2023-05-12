@@ -1,4 +1,4 @@
-from transformers import AutoModelForSequenceClassification, Trainer, TrainingArguments, AutoTokenizer
+from transformers import AutoModelForSequenceClassification, Trainer, TrainingArguments, AutoTokenizer, AdamW, get_linear_schedule_with_warmup
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support
 from datasets import load_from_disk
 import random
@@ -13,12 +13,12 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
     # hyperparameters sent by the client are passed as command-line arguments to the script.
-    parser.add_argument("--epochs", type=int, default=3)
+    parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--train_batch_size", type=int, default=32)
-    parser.add_argument("--eval_batch_size", type=int, default=64)
+    parser.add_argument("--eval_batch_size", type=int, default=16)
     parser.add_argument("--warmup_steps", type=int, default=500)
     parser.add_argument("--model_name", type=str)
-    parser.add_argument("--learning_rate", type=str, default=5e-5)
+    parser.add_argument("--learning_rate", type=str, default=2e-5)
 
     # Data, model, and output directories
     parser.add_argument("--output_data_dir", type=str, default=os.environ["SM_OUTPUT_DATA_DIR"])
@@ -53,7 +53,7 @@ if __name__ == "__main__":
         acc = accuracy_score(labels, preds)
         return {"accuracy": acc, "f1": f1, "precision": precision, "recall": recall}
 
-    # download model from model hub
+    # download pretrained model & tokenizer from model hub
     model = AutoModelForSequenceClassification.from_pretrained(args.model_name)
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
 
@@ -70,6 +70,29 @@ if __name__ == "__main__":
     )
 
     # create Trainer instance
+    no_decay = ["bias", "LayerNorm.weight"]
+    optimizer_grouped_parameters = [
+            {
+                "params": [p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay)],
+                "weight_decay": 0.01,
+            }, 
+            {
+                "params": [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)],
+                "weight_decay": 0.0
+            }
+    ]
+    optimizer = AdamW(optimizer_grouped_parameters,
+                      lr = 2e-5, # args.learning_rate - default is 5e-5
+                      eps = 1e-6, # args.adam_epsilon  - default is 1e-8
+                      betas = [0.9,0.999],
+                      correct_bias = True
+    )
+
+    lr_scheduler = get_linear_schedule_with_warmup(
+        optimizer, num_warmup_steps=args.epochs*0.1,
+        num_training_steps=args.epochs+1
+    )
+    
     trainer = Trainer(
         model=model,
         args=training_args,
@@ -77,8 +100,9 @@ if __name__ == "__main__":
         train_dataset=train_dataset,
         eval_dataset=test_dataset,
         tokenizer=tokenizer,
+        optimizers=(optimizer, lr_scheduler)
     )
-
+    
     # train model
     trainer.train()
 
